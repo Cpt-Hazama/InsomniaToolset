@@ -17,8 +17,8 @@ struct GLTFAni : GLTFModel {
     return Stream(aniStream);
   }
 
-  uint32 timesAccId;
-  uint16 maxFrames = 0;
+  std::map<float, uint32> timesAccId;
+  std::map<float, uint16> maxFrames;
   int32 staticTimes = -1;
 
 private:
@@ -71,7 +71,7 @@ void IS_EXTERN RegionToGltf(IMGLTF &main, IGHW &ighw,
 void IS_EXTERN GenerateInstances(IMGLTF &main);
 void IS_EXTERN LoadAnimations(GLTFAni &glMain,
                               IGHWTOCIteratorConst<Animation> animations,
-                              const int translationShift);
+                              const Skeleton *skel);
 void IS_EXTERN LoadAnimations(GLTFAni &glMain,
                               const es::PointerX86<Animation> *anims,
                               const uint32 numAnimations, const Skeleton *skel);

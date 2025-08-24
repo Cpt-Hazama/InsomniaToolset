@@ -111,10 +111,31 @@ void LoadRootMotion(GLTFAni &glMain, const Animation &a, int32 timesAcc,
 }
 
 void LoadAnimation(GLTFAni &glMain, const Animation &a,
-                   const float positionScale) {
+                   const float positionScale, const float scaleScale) {
   std::map<uint16, std::vector<SVector4>> positions;
+  std::map<uint16, std::vector<SVector4>> scales;
   std::map<uint16, std::vector<SVector4>> rotations;
   std::map<uint16, SVector4> positionsStatic;
+  std::map<uint16, SVector4> scalesStatic;
+
+  auto FindNode = [&glMain](int idx) {
+    if (auto  &node = glMain.nodes.at(idx); node.name.ends_with("_s")){
+      std::string name(node.name);
+      name.resize(name.size() - 2);
+
+      for (int nid = 0; auto &n : glMain.nodes) {
+        if (n.name == name) {
+          return nid;
+        }
+
+        nid++;
+      }
+
+      assert(false);
+    }
+
+    return idx;
+  };
 
   for (int32 i = -1; auto &m : a.RefPoseMasks()) {
     assert(m.unk == 2);
@@ -122,6 +143,9 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     if (m.type == TrackType::Position) {
       positionsStatic[m.boneIndex][m.component] = a.RefPoseValues()[i];
       positionsStatic[m.boneIndex].w |= 1 << m.component;
+    } else if (m.type == TrackType::Scale) {
+      scalesStatic[m.boneIndex][m.component] = a.RefPoseValues()[i];
+      scalesStatic[m.boneIndex].w |= 1 << m.component;
     }
   }
 
@@ -141,6 +165,14 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
           positions[m.boneIndex].resize(a.numFrames);
         }
       }
+    } else if (m.type == TrackType::Scale) {
+      if (scales[m.boneIndex].empty()) {
+        if (scalesStatic.contains(m.boneIndex)) {
+          scales[m.boneIndex].resize(a.numFrames, scalesStatic.at(m.boneIndex));
+        } else {
+          scales[m.boneIndex].resize(a.numFrames);
+        }
+      }
     }
   }
 
@@ -154,6 +186,10 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     } else if (m.type == TrackType::Position) {
       if (positions[m.boneIndex].empty()) {
         positions[m.boneIndex].resize(a.numFrames);
+      }
+    } else if (m.type == TrackType::Scale) {
+      if (scales[m.boneIndex].empty()) {
+        scales[m.boneIndex].resize(a.numFrames);
       }
     }
   }
@@ -169,6 +205,8 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
           positions[m.boneIndex].at(f)[m.component] = v;
         } else if (m.type == TrackType::Rotation) {
           rotations[m.boneIndex].at(f)[m.component] = v;
+        } else if (m.type == TrackType::Scale) {
+          scales[m.boneIndex].at(f)[m.component] = v;
         }
 
         curNode++;
@@ -190,6 +228,9 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
           positions[m.boneIndex].at(f).w |= 1 << m.component;
         } else if (m.type == TrackType::Rotation) {
           rotations[m.boneIndex].at(f)[m.component] = value;
+        } else if (m.type == TrackType::Scale) {
+          scales[m.boneIndex].at(f)[m.component] = value;
+          scales[m.boneIndex].at(f).w |= 1 << m.component;
         }
 
         curNode++;
@@ -197,12 +238,12 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     }
   }
 
-  uint32 curTimesAccId = glMain.timesAccId;
+  uint32 curTimesAccId = glMain.timesAccId[a.frameRate];
 
-  if (a.numFrames != glMain.maxFrames) {
+  if (a.numFrames != glMain.maxFrames[a.frameRate]) {
     curTimesAccId = glMain.accessors.size();
-    auto &nacc =
-        glMain.accessors.emplace_back(glMain.accessors.at(glMain.timesAccId));
+    auto &nacc = glMain.accessors.emplace_back(
+        glMain.accessors.at(glMain.timesAccId[a.frameRate]));
     nacc.count = a.numFrames;
     nacc.max.back() = a.numFrames > 0 ? (1.f / 30) * (a.numFrames - 1) : 0;
   }
@@ -218,7 +259,7 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     acc.count = a.numFrames;
 
     auto &channel = glAnim.channels.emplace_back();
-    channel.target.node = b;
+    channel.target.node = FindNode(b);
     channel.target.path = "translation";
     channel.sampler = glAnim.samplers.size();
 
@@ -226,11 +267,42 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     sampler.output = accId;
     sampler.input = curTimesAccId;
 
-    auto &refPos = glMain.nodes.at(b).translation;
+    auto &refPos = glMain.nodes.at(channel.target.node).translation;
 
     for (auto &v : r) {
       Vector4A16 value(v.Convert<float>());
       value *= positionScale * YARD_TO_M;
+
+      for (uint8 i = 0; i < 3; i++) {
+        if (!(v.w & (1 << i))) {
+          value[i] = refPos[i];
+        }
+      }
+
+      str.wr.Write<Vector>(value);
+    }
+  }
+
+  for (const auto &[b, r] : scales) {
+    auto [acc, accId] = glMain.NewAccessor(str, 4);
+    acc.type = gltf::Accessor::Type::Vec3;
+    acc.componentType = gltf::Accessor::ComponentType::Float;
+    acc.count = a.numFrames;
+
+    auto &channel = glAnim.channels.emplace_back();
+    channel.target.node = b;
+    channel.target.path = "scale";
+    channel.sampler = glAnim.samplers.size();
+
+    auto &sampler = glAnim.samplers.emplace_back();
+    sampler.output = accId;
+    sampler.input = curTimesAccId;
+
+    auto &refPos = glMain.nodes.at(b).scale;
+
+    for (auto &v : r) {
+      Vector4A16 value(v.Convert<float>());
+      value *= scaleScale;
 
       for (uint8 i = 0; i < 3; i++) {
         if (!(v.w & (1 << i))) {
@@ -250,7 +322,7 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     acc.count = a.numFrames;
 
     auto &channel = glAnim.channels.emplace_back();
-    channel.target.node = b;
+    channel.target.node = FindNode(b);
     channel.target.path = "rotation";
     channel.sampler = glAnim.samplers.size();
 
@@ -281,8 +353,8 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
 
     if (glMain.staticTimes < 0) {
       glMain.staticTimes = glMain.accessors.size();
-      auto &nacc =
-          glMain.accessors.emplace_back(glMain.accessors.at(glMain.timesAccId));
+      auto &nacc = glMain.accessors.emplace_back(
+          glMain.accessors.at(glMain.timesAccId[a.frameRate]));
       nacc.count = 1;
       nacc.max.back() = 0;
     }
@@ -294,7 +366,7 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     acc.count = 1;
 
     auto &channel = glAnim.channels.emplace_back();
-    channel.target.node = i;
+    channel.target.node = FindNode(i);
     channel.target.path = "rotation";
     channel.sampler = glAnim.samplers.size();
 
@@ -318,8 +390,49 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     if (glMain.staticTimes < 0) {
       glMain.staticTimes = glMain.accessors.size();
 
-      auto &nacc =
-          glMain.accessors.emplace_back(glMain.accessors.at(glMain.timesAccId));
+      auto &nacc = glMain.accessors.emplace_back(
+          glMain.accessors.at(glMain.timesAccId[a.frameRate]));
+      nacc.count = 1;
+      nacc.max.back() = 0;
+    }
+
+    auto [acc, accId] = glMain.NewAccessor(str, 4);
+    acc.type = gltf::Accessor::Type::Vec3;
+    acc.componentType = gltf::Accessor::ComponentType::Float;
+    acc.count = 1;
+
+    auto &channel = glAnim.channels.emplace_back();
+    channel.target.node = FindNode(b);
+    channel.target.path = "translation";
+    channel.sampler = glAnim.samplers.size();
+
+    auto &sampler = glAnim.samplers.emplace_back();
+    sampler.output = accId;
+    sampler.input = glMain.staticTimes;
+
+    auto &refPos = glMain.nodes.at(channel.target.node).translation;
+    Vector4A16 value(p.Convert<float>());
+    value *= positionScale * YARD_TO_M;
+
+    for (uint8 i = 0; i < 3; i++) {
+      if (!(p.w & (1 << i))) {
+        value[i] = refPos[i];
+      }
+    }
+
+    str.wr.Write<Vector>(value);
+  }
+
+  for (auto &[b, p] : scalesStatic) {
+    if (scales.contains(b)) {
+      continue;
+    }
+
+    if (glMain.staticTimes < 0) {
+      glMain.staticTimes = glMain.accessors.size();
+
+      auto &nacc = glMain.accessors.emplace_back(
+          glMain.accessors.at(glMain.timesAccId[a.frameRate]));
       nacc.count = 1;
       nacc.max.back() = 0;
     }
@@ -331,16 +444,16 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
 
     auto &channel = glAnim.channels.emplace_back();
     channel.target.node = b;
-    channel.target.path = "translation";
+    channel.target.path = "scale";
     channel.sampler = glAnim.samplers.size();
 
     auto &sampler = glAnim.samplers.emplace_back();
     sampler.output = accId;
     sampler.input = glMain.staticTimes;
 
-    auto &refPos = glMain.nodes.at(b).translation;
+    auto &refPos = glMain.nodes.at(b).scale;
     Vector4A16 value(p.Convert<float>());
-    value *= positionScale * YARD_TO_M;
+    value *= scaleScale;
 
     for (uint8 i = 0; i < 3; i++) {
       if (!(p.w & (1 << i))) {
@@ -396,27 +509,31 @@ void SwapAnimBuffer(Animation &item) {
 void MakeFrames(GLTFAni &glMain) {
   auto &str = glMain.AnimStream();
 
-  auto [timesAcc, timesAccId] = glMain.NewAccessor(str, 4);
-  timesAcc.type = gltf::Accessor::Type::Scalar;
-  timesAcc.componentType = gltf::Accessor::ComponentType::Float;
-  timesAcc.count = glMain.maxFrames;
-  timesAcc.min.emplace_back(0);
-  glMain.timesAccId = timesAccId;
+  for (auto [frameRate, maxFrames] : glMain.maxFrames) {
+    auto [timesAcc, timesAccId] = glMain.NewAccessor(str, 4);
+    timesAcc.type = gltf::Accessor::Type::Scalar;
+    timesAcc.componentType = gltf::Accessor::ComponentType::Float;
+    timesAcc.count = maxFrames;
+    timesAcc.min.emplace_back(0);
+    glMain.timesAccId[frameRate] = timesAccId;
 
-  if (glMain.maxFrames < 2) {
-    str.wr.Write<float>(0);
-    timesAcc.max.emplace_back(0);
-  } else {
-    auto times = gltfutils::MakeSamples(30, (glMain.maxFrames - 1) / 30.f);
-    str.wr.WriteContainer(times);
-    timesAcc.max.emplace_back(times.back());
+    if (maxFrames < 2) {
+      str.wr.Write<float>(0);
+      timesAcc.max.emplace_back(0);
+    } else {
+      auto times =
+          gltfutils::MakeSamples(frameRate, (maxFrames - 1) / frameRate);
+      str.wr.WriteContainer(times);
+      timesAcc.max.emplace_back(times.back());
+    }
   }
 }
 
 void LoadAnimations(GLTFAni &glMain, const es::PointerX86<Animation> *anims,
                     const uint32 numAnimations, const Skeleton *skel) {
   for (uint32 i = 0; i < numAnimations; i++) {
-    glMain.maxFrames = std::max(anims[i]->numFrames, glMain.maxFrames);
+    glMain.maxFrames[anims[i]->frameRate] =
+        std::max(anims[i]->numFrames, glMain.maxFrames[anims[i]->frameRate]);
   }
 
   MakeFrames(glMain);
@@ -449,20 +566,22 @@ void LoadAnimations(GLTFAni &glMain, const es::PointerX86<Animation> *anims,
 
   std::set<std::string> usedAnims;
   const float positionScale = 1.f / (0x7fff >> skel->translationShift);
+  const float scaleScale = 1.f / (0x7fff >> skel->scaleShift);
 
   for (uint32 i = 0; i < numAnimations; i++) {
     const Animation &a = *anims[i];
     if (!usedAnims.contains(a.name.Get())) {
-      LoadAnimation(glMain, a, positionScale);
+      LoadAnimation(glMain, a, positionScale, scaleScale);
       usedAnims.emplace(a.name.Get());
     }
   }
 }
 
 void LoadAnimations(GLTFAni &glMain, IGHWTOCIteratorConst<Animation> animations,
-                    const int translationShift) {
+                    const Skeleton *skel) {
   for (auto &a : animations) {
-    glMain.maxFrames = std::max(a.numFrames, glMain.maxFrames);
+    glMain.maxFrames[a.frameRate] =
+        std::max(a.numFrames, glMain.maxFrames[a.frameRate]);
   }
 
   MakeFrames(glMain);
@@ -487,10 +606,11 @@ void LoadAnimations(GLTFAni &glMain, IGHWTOCIteratorConst<Animation> animations,
   }
 
   // Guessed magic number
-  const float positionScale = 1.f / (0x7500 >> translationShift);
+  const float positionScale = 1.f / (0x7500 >> skel->translationShift);
+  const float scaleScale = 1.f / (0x7500 >> skel->scaleShift);
 
   for (auto &a : animations) {
-    LoadAnimation(glMain, a, positionScale);
+    LoadAnimation(glMain, a, positionScale, scaleScale);
   }
 }
 

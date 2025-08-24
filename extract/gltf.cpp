@@ -4,6 +4,71 @@
 #include "spike/app_context.hpp"
 #include "spike/io/binreader_stream.hpp"
 
+void GenerateSkeleton(GLTF &main, const Skeleton *skeleton) {
+  for (uint32 i = 0; i < skeleton->numBones; i++) {
+    gltf::Node &glNode = main.nodes.emplace_back();
+    glNode.name = std::to_string(i);
+    es::Matrix44 tm(skeleton->tms0[i]);
+
+    if (int16 parentIndex = skeleton->bones[i].parentIndex; parentIndex < 0) {
+      main.scenes.front().nodes.emplace_back(i);
+    } else {
+      main.nodes.at(parentIndex).children.emplace_back(i);
+      es::Matrix44 ptm(skeleton->tms1[parentIndex]);
+      tm = ptm * tm;
+    }
+
+    tm.r1().w = 0;
+    tm.r2().w = 0;
+    tm.r3().w = 0;
+    tm.r4().w = 1;
+
+    Vector4A16 rotation, translation, scale;
+    tm.Decompose(translation, rotation, scale);
+    memcpy(glNode.rotation.data(), &rotation, 16);
+    memcpy(glNode.translation.data(), &translation, 12);
+    memcpy(glNode.scale.data(), &scale, 12);
+  }
+
+  for (int32 i = 0; i < skeleton->numBones; i++) {
+    auto *glNode = &main.nodes.at(i);
+
+    bool scaleTypes[2]{};
+    for (int n : glNode->children) {
+      scaleTypes[bool(skeleton->bones[n].flags &
+                      Bone::FLAG_DONT_INHERIT_SCALE)] = true;
+    }
+
+    if (!scaleTypes[0] || !scaleTypes[1]) {
+      continue;
+    }
+
+    auto oldChildren = std::move(glNode->children);
+    for (auto &n : main.nodes) {
+      for (auto &c : n.children) {
+        if (c == i) {
+          c = main.nodes.size();
+          break;
+        }
+      }
+    }
+    auto &sNode = main.nodes.emplace_back();
+    glNode = &main.nodes.at(i);
+    sNode = *glNode;
+    sNode.children.emplace_back(i);
+    *glNode = {};
+    glNode->name = sNode.name + "_s";
+
+    for (int n : oldChildren) {
+      if (skeleton->bones[n].flags & Bone::FLAG_DONT_INHERIT_SCALE) {
+        sNode.children.emplace_back(n);
+      } else {
+        glNode->children.emplace_back(n);
+      }
+    }
+  }
+}
+
 void MobyToGltf(IGHWTOCIteratorConst<ResourceShaders> &shaders, IGHW &ighw,
                 AppContext *ctx, AppContextStream &shdStream,
                 IGHWTOCIteratorConst<ResourceAnimsets> &anims) {
@@ -46,31 +111,7 @@ void MobyToGltf(IGHWTOCIteratorConst<ResourceShaders> &shaders, IGHW &ighw,
   const MobyV2 *moby = mobys.begin();
   const Skeleton *skeleton = moby->skeleton;
   assert((skeleton->translationShift & 0xf0) == 0);
-
-  for (uint32 i = 0; i < skeleton->numBones; i++) {
-    gltf::Node &glNode = main.nodes.emplace_back();
-    glNode.name = std::to_string(i);
-    es::Matrix44 tm(skeleton->tms0[i]);
-
-    if (int16 parentIndex = skeleton->bones[i].parentIndex; parentIndex < 0) {
-      main.scenes.front().nodes.emplace_back(i);
-    } else {
-      main.nodes.at(parentIndex).children.emplace_back(i);
-      es::Matrix44 ptm(skeleton->tms1[parentIndex]);
-      tm = ptm * tm;
-    }
-
-    tm.r1().w = 0;
-    tm.r2().w = 0;
-    tm.r3().w = 0;
-    tm.r4().w = 1;
-
-    Vector4A16 rotation, translation, scale;
-    tm.Decompose(translation, rotation, scale);
-    memcpy(glNode.rotation.data(), &rotation, 16);
-    memcpy(glNode.translation.data(), &translation, 12);
-    memcpy(glNode.scale.data(), &scale, 12);
-  }
+  GenerateSkeleton(main, skeleton);
 
   const uint16 *indexBuffer = &indexBuffers.begin()->data;
   const char *vertexBuffer = &vertexBuffers.begin()->data;
@@ -306,7 +347,7 @@ void MobyToGltf(IGHWTOCIteratorConst<ResourceShaders> &shaders, IGHW &ighw,
     IGHWTOCIteratorConst<Animation> animations;
 
     CatchClasses(animData, animations);
-    LoadAnimations(main, animations, skeleton->translationShift);
+    LoadAnimations(main, animations, skeleton);
   }
 
   main.FinishAndSave(ctx->NewFile(mobyPath.ChangeExtension2("glb")).str, "");
