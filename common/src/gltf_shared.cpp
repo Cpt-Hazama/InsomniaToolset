@@ -110,8 +110,15 @@ void LoadRootMotion(GLTFAni &glMain, const Animation &a, int32 timesAcc,
   }
 }
 
+struct NodeTrack {
+  std::vector<Vector4A16> positions;
+  std::vector<Vector4A16> scales;
+  uint32 scaleNode;
+};
+
 void LoadAnimation(GLTFAni &glMain, const Animation &a,
-                   const float positionScale, const float scaleScale) {
+                   const float positionScale, const float scaleScale,
+                   bool scalePostProcess) {
   std::map<uint16, std::vector<SVector4>> positions;
   std::map<uint16, std::vector<SVector4>> scales;
   std::map<uint16, std::vector<SVector4>> rotations;
@@ -119,7 +126,7 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
   std::map<uint16, SVector4> scalesStatic;
 
   auto FindNode = [&glMain](int idx) {
-    if (auto  &node = glMain.nodes.at(idx); node.name.ends_with("_s")){
+    if (auto &node = glMain.nodes.at(idx); node.name.ends_with("_s")) {
       std::string name(node.name);
       name.resize(name.size() - 2);
 
@@ -252,26 +259,70 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
   glAnim.name = a.name.Get();
   auto &str = glMain.AnimStream();
 
+  std::map<uint16, NodeTrack> tracks;
+
   for (const auto &[b, r] : positions) {
+    uint32 controlNode = FindNode(b);
+    std::function<void(Vector4A16 &)> PerValue = [&str](Vector4A16 &value) {
+      str.wr.Write<Vector>(value);
+    };
+
+    if (!scalePostProcess) {
+      auto [acc, accId] = glMain.NewAccessor(str, 4);
+      acc.type = gltf::Accessor::Type::Vec3;
+      acc.componentType = gltf::Accessor::ComponentType::Float;
+      acc.count = a.numFrames;
+
+      auto &channel = glAnim.channels.emplace_back();
+      channel.target.node = controlNode;
+      channel.target.path = "translation";
+      channel.sampler = glAnim.samplers.size();
+
+      auto &sampler = glAnim.samplers.emplace_back();
+      sampler.output = accId;
+      sampler.input = curTimesAccId;
+    } else {
+      auto &tck = tracks[controlNode].positions;
+      tck.reserve(r.size());
+      PerValue = [&tck](Vector4A16 &value) { tck.emplace_back(value); };
+    }
+
+    auto &refPos = glMain.nodes.at(controlNode).translation;
+
+    for (auto &v : r) {
+      Vector4A16 value(v.Convert<float>());
+      value *= positionScale * YARD_TO_M;
+
+      for (uint8 i = 0; i < 3; i++) {
+        if (!(v.w & (1 << i))) {
+          value[i] = refPos[i];
+        }
+      }
+
+      PerValue(value);
+    }
+  }
+
+  for (const auto &[b, r] : scales) {
     auto [acc, accId] = glMain.NewAccessor(str, 4);
     acc.type = gltf::Accessor::Type::Vec3;
     acc.componentType = gltf::Accessor::ComponentType::Float;
     acc.count = a.numFrames;
 
     auto &channel = glAnim.channels.emplace_back();
-    channel.target.node = FindNode(b);
-    channel.target.path = "translation";
+    channel.target.node = b;
+    channel.target.path = "scale";
     channel.sampler = glAnim.samplers.size();
 
     auto &sampler = glAnim.samplers.emplace_back();
     sampler.output = accId;
     sampler.input = curTimesAccId;
 
-    auto &refPos = glMain.nodes.at(channel.target.node).translation;
+    auto &refPos = glMain.nodes.at(b).scale;
 
     for (auto &v : r) {
       Vector4A16 value(v.Convert<float>());
-      value *= positionScale * YARD_TO_M;
+      value *= scaleScale;
 
       for (uint8 i = 0; i < 3; i++) {
         if (!(v.w & (1 << i))) {
@@ -387,6 +438,58 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
       continue;
     }
 
+    uint32 controlNode = FindNode(b);
+
+    std::function<void(Vector4A16 &)> PerValue = [&str](Vector4A16 &value) {
+      str.wr.Write<Vector>(value);
+    };
+
+    if (!scalePostProcess) {
+      if (glMain.staticTimes < 0) {
+        glMain.staticTimes = glMain.accessors.size();
+
+        auto &nacc = glMain.accessors.emplace_back(
+            glMain.accessors.at(glMain.timesAccId[a.frameRate]));
+        nacc.count = 1;
+        nacc.max.back() = 0;
+      }
+
+      auto [acc, accId] = glMain.NewAccessor(str, 4);
+      acc.type = gltf::Accessor::Type::Vec3;
+      acc.componentType = gltf::Accessor::ComponentType::Float;
+      acc.count = 1;
+
+      auto &channel = glAnim.channels.emplace_back();
+      channel.target.node = controlNode;
+      channel.target.path = "translation";
+      channel.sampler = glAnim.samplers.size();
+
+      auto &sampler = glAnim.samplers.emplace_back();
+      sampler.output = accId;
+      sampler.input = glMain.staticTimes;
+    } else {
+      auto &tck = tracks[controlNode].positions;
+      PerValue = [&tck, &a](Vector4A16 &value) { tck.insert(tck.end(), a.numFrames, value); };
+    }
+
+    auto &refPos = glMain.nodes.at(controlNode).translation;
+    Vector4A16 value(p.Convert<float>());
+    value *= positionScale * YARD_TO_M;
+
+    for (uint8 i = 0; i < 3; i++) {
+      if (!(p.w & (1 << i))) {
+        value[i] = refPos[i];
+      }
+    }
+
+    PerValue(value);
+  }
+
+  for (auto &[b, p] : scalesStatic) {
+    if (scales.contains(b)) {
+      continue;
+    }
+
     if (glMain.staticTimes < 0) {
       glMain.staticTimes = glMain.accessors.size();
 
@@ -402,17 +505,17 @@ void LoadAnimation(GLTFAni &glMain, const Animation &a,
     acc.count = 1;
 
     auto &channel = glAnim.channels.emplace_back();
-    channel.target.node = FindNode(b);
-    channel.target.path = "translation";
+    channel.target.node = b;
+    channel.target.path = "scale";
     channel.sampler = glAnim.samplers.size();
 
     auto &sampler = glAnim.samplers.emplace_back();
     sampler.output = accId;
     sampler.input = glMain.staticTimes;
 
-    auto &refPos = glMain.nodes.at(channel.target.node).translation;
+    auto &refPos = glMain.nodes.at(b).scale;
     Vector4A16 value(p.Convert<float>());
-    value *= positionScale * YARD_TO_M;
+    value *= scaleScale;
 
     for (uint8 i = 0; i < 3; i++) {
       if (!(p.w & (1 << i))) {
@@ -571,7 +674,7 @@ void LoadAnimations(GLTFAni &glMain, const es::PointerX86<Animation> *anims,
   for (uint32 i = 0; i < numAnimations; i++) {
     const Animation &a = *anims[i];
     if (!usedAnims.contains(a.name.Get())) {
-      LoadAnimation(glMain, a, positionScale, scaleScale);
+      LoadAnimation(glMain, a, positionScale, scaleScale, false);
       usedAnims.emplace(a.name.Get());
     }
   }
@@ -610,7 +713,7 @@ void LoadAnimations(GLTFAni &glMain, IGHWTOCIteratorConst<Animation> animations,
   const float scaleScale = 1.f / (0x7500 >> skel->scaleShift);
 
   for (auto &a : animations) {
-    LoadAnimation(glMain, a, positionScale, scaleScale);
+    LoadAnimation(glMain, a, positionScale, scaleScale, false);
   }
 }
 
