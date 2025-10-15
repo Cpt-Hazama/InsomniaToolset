@@ -5,10 +5,13 @@
 #include "spike/io/binreader_stream.hpp"
 
 void GenerateSkeleton(GLTF &main, const Skeleton *skeleton) {
+  bool keepScale = false;
+
   for (uint32 i = 0; i < skeleton->numBones; i++) {
     gltf::Node &glNode = main.nodes.emplace_back();
     glNode.name = std::to_string(i);
     es::Matrix44 tm(skeleton->tms0[i]);
+    keepScale |= bool(skeleton->bones[i].flags & Bone::FLAG_DONT_INHERIT_SCALE);
 
     if (int16 parentIndex = skeleton->bones[i].parentIndex; parentIndex < 0) {
       main.scenes.front().nodes.emplace_back(i);
@@ -30,20 +33,17 @@ void GenerateSkeleton(GLTF &main, const Skeleton *skeleton) {
     memcpy(glNode.scale.data(), &scale, 12);
   }
 
-  for (int32 i = 0; i < skeleton->numBones; i++) {
+  if (!keepScale) {
+    return;
+  }
+
+  for (int32 i = 1; i < skeleton->numBones; i++) {
     auto *glNode = &main.nodes.at(i);
 
-    bool scaleTypes[2]{};
-    for (int n : glNode->children) {
-      scaleTypes[bool(skeleton->bones[n].flags &
-                      Bone::FLAG_DONT_INHERIT_SCALE)] = true;
-    }
-
-    if (!scaleTypes[0] || !scaleTypes[1]) {
+    if (glNode->children.empty()) {
       continue;
     }
 
-    auto oldChildren = std::move(glNode->children);
     for (auto &n : main.nodes) {
       for (auto &c : n.children) {
         if (c == i) {
@@ -58,14 +58,6 @@ void GenerateSkeleton(GLTF &main, const Skeleton *skeleton) {
     sNode.children.emplace_back(i);
     *glNode = {};
     glNode->name = sNode.name + "_s";
-
-    for (int n : oldChildren) {
-      if (skeleton->bones[n].flags & Bone::FLAG_DONT_INHERIT_SCALE) {
-        sNode.children.emplace_back(n);
-      } else {
-        glNode->children.emplace_back(n);
-      }
-    }
   }
 }
 
