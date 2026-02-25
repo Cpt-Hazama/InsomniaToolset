@@ -97,4 +97,6 @@ Converts entire region map to GLTF.
 This toolset is available under GPL v3 license. (See LICENSE)\
 This toolset uses following libraries:
 
-- Spike, Copyright (c) 2016-2025 Lukas Cone (Apache 2)
+- Spike, Copyright (c) 2016-2025 Lukas Cone (Apache 2
+
+build fool build
